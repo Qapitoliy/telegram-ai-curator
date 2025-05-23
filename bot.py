@@ -4,7 +4,6 @@ import aiohttp
 import aiosqlite
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from dotenv import load_dotenv
@@ -14,105 +13,97 @@ load_dotenv()
 # Настройки
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")  # например: https://your-service.onrender.com
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")  # Например: https://your-service.onrender.com
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 PORT = int(os.getenv("PORT", 10000))
+DB_PATH = "memory.db"
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Инициализация бота с исправлением предупреждения по parse_mode
-bot = Bot(
-    token=TELEGRAM_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
+# Инициализация бота и диспетчера
+bot = Bot(token=TELEGRAM_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
-DB_PATH = "memory.db"
-
-# Инициализация базы данных для постоянной памяти
+# Инициализация базы данных (память)
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS user_memory (
-                user_id INTEGER PRIMARY KEY,
-                history TEXT
-            )
-        """)
-        await db.commit()
-
-async def get_user_memory(user_id: int) -> str:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT history FROM user_memory WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else ""
-
-async def update_user_memory(user_id: int, new_text: str):
-    old_memory = await get_user_memory(user_id)
-    # Добавляем новую реплику к истории, ограничим длину (например, 3000 символов)
-    updated_memory = (old_memory + "\n" + new_text).strip()
-    if len(updated_memory) > 3000:
-        updated_memory = updated_memory[-3000:]  # Оставляем последние 3000 символов
-    async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO user_memory(user_id, history) VALUES(?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET history=excluded.history",
-            (user_id, updated_memory)
+            """CREATE TABLE IF NOT EXISTS user_memory (
+                user_id INTEGER PRIMARY KEY,
+                context TEXT
+            )"""
         )
         await db.commit()
 
-# Функция запроса к Groq API с учетом памяти
-async def ask_groq(prompt: str) -> str:
+# Функция получения контекста из памяти
+async def get_user_context(user_id: int) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT context FROM user_memory WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else ""
+
+# Функция сохранения контекста
+async def save_user_context(user_id: int, context: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO user_memory (user_id, context) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET context=excluded.context",
+            (user_id, context),
+        )
+        await db.commit()
+
+# Функция запроса к Groq API с учётом контекста
+async def ask_groq(user_id: int, prompt: str) -> str:
+    context = await get_user_context(user_id)
+
+    messages = [
+        {"role": "system", "content": "Ты — дружелюбный Telegram-бот с ИИ, помогай пользователю."},
+    ]
+
+    if context:
+        messages.append({"role": "assistant", "content": context})
+
+    messages.append({"role": "user", "content": prompt})
+
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
     json_data = {
-        "model": "llama3-70b-8192",
-        "messages": [
-            {"role": "system", "content": "Ты — дружелюбный Telegram-бот с ИИ, помогай пользователю."},
-            {"role": "user", "content": prompt}
-        ]
+        "model": "llama-3.3-70b-versatile",
+        "messages": messages
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=json_data) as response:
             result = await response.json()
             try:
-                return result["choices"][0]["message"]["content"]
+                answer = result["choices"][0]["message"]["content"]
+                # Обновляем контекст памяти
+                new_context = (context + "\n" + prompt + "\n" + answer).strip()
+                await save_user_context(user_id, new_context)
+                return answer
             except Exception as e:
-                logger.error("Ошибка в ответе Groq: %s", result)
+                logging.error("Ошибка в ответе Groq: %s", result)
                 return "Извините, произошла ошибка при обработке вашего запроса."
 
-# Обработчик сообщений с памятью
+# Обработчик сообщений
+@dp.message()
 async def handle_message(message: types.Message):
-    user_id = message.from_user.id
     user_text = message.text
-    
-    history = await get_user_memory(user_id)
-    prompt = history + "\nПользователь: " + user_text + "\nБот:"
-    
-    response = await ask_groq(prompt)
-    
-    # Обновляем память: добавляем вопрос и ответ
-    await update_user_memory(user_id, f"Пользователь: {user_text}\nБот: {response}")
-    
+    response = await ask_groq(message.from_user.id, user_text)
     await message.answer(response)
-
-dp.message.register(handle_message)
 
 # Настройка webhook
 async def on_startup(bot: Bot):
     await init_db()
     await bot.set_webhook(WEBHOOK_URL)
-    logger.info(f"Webhook установлен: {WEBHOOK_URL}")
+    logging.info(f"Webhook установлен: {WEBHOOK_URL}")
 
 async def on_shutdown(bot: Bot):
     await bot.delete_webhook()
-    await bot.session.close()
-    logger.info("Webhook удалён и сессия закрыта")
+    logging.info("Webhook удалён")
 
 app = web.Application()
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
