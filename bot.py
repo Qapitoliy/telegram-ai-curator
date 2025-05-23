@@ -1,79 +1,55 @@
-import logging
 import os
+import logging
+import asyncio
 from aiogram import Bot, Dispatcher, types
-from aiohttp import web
-import aiohttp
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# Настройки
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-WEBAPP_HOST = "0.0.0.0"
-WEBAPP_PORT = int(os.getenv("PORT", 10000))
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+from aiohttp import ClientSession
 
 logging.basicConfig(level=logging.INFO)
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(bot)
 
+API_URL = "https://api.groq.com/v1/completions"
 
-# Генерация ответа через Groq
-async def generate_response(message_text: str) -> str:
+async def query_groq(prompt: str) -> str:
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
-
     payload = {
-        "model": "mixtral-8x7b-32768",
-        "messages": [
-            {"role": "system", "content": "Ты персональный ИИ-куратор. Помогай пользователю с задачами, мотивацией, планами, бизнесом, психологической поддержкой и спортом."},
-            {"role": "user", "content": message_text},
-        ]
+        "model": GROQ_MODEL,
+        "prompt": prompt,
+        "max_tokens": 512,
+        "temperature": 0.7,
+        "top_p": 1,
+        "n": 1,
+        "stop": None,
     }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(GROQ_API_URL, headers=headers, json=payload) as resp:
-            data = await resp.json()
+    async with ClientSession() as session:
+        async with session.post(API_URL, json=payload, headers=headers) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data["choices"][0]["text"].strip()
+            else:
+                error_text = await resp.text()
+                logging.error(f"Ошибка в ответе Groq: {error_text}")
+                return "Извините, произошла ошибка при обработке вашего запроса."
 
-            if "choices" not in data:
-                logging.error(f"Ошибка в ответе Groq: {data}")
-                return "⚠️ Не удалось получить ответ от ИИ."
-
-            return data["choices"][0]["message"]["content"]
-
-
-# Обработка входящих сообщений
 @dp.message_handler()
 async def handle_message(message: types.Message):
-    response = await generate_response(message.text)
-    await message.answer(response)
+    user_text = message.text
+    logging.info(f"Запрос пользователя: {user_text}")
+    response_text = await query_groq(user_text)
+    await message.answer(response_text)
 
-
-# Webhook обработчик
-async def on_startup(app):
-    await bot.set_webhook(WEBHOOK_URL)
-
-async def on_shutdown(app):
-    await bot.delete_webhook()
-
-async def handle_webhook(request):
-    update = types.Update(**await request.json())
-    await dp.process_update(update)
-    return web.Response()
-
-# Запуск aiohttp-сервера
-def main():
-    app = web.Application()
-    app.router.add_post(WEBHOOK_PATH, handle_webhook)
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-    web.run_app(app, host=WEBAPP_HOST, port=WEBAPP_PORT)
+async def on_startup(dp):
+    logging.info("Бот запущен")
 
 if __name__ == "__main__":
-    main()
+    from aiogram import executor
+    executor.start_polling(dp, on_startup=on_startup)
