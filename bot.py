@@ -1,64 +1,72 @@
 import os
 import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiohttp import web
 import aiohttp
-import asyncio
-import httpx
+from aiogram import Bot, Dispatcher, types
+from aiogram.enums import ParseMode
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO)
+load_dotenv()
 
+# Настройки
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")  # например: https://your-service.onrender.com
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+PORT = int(os.getenv("PORT", 10000))
 
-bot = Bot(token=TELEGRAM_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+# Логирование
+logging.basicConfig(level=logging.INFO)
 
+# Инициализация бота
+bot = Bot(token=TELEGRAM_TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher()
+
+# Функция запроса к Groq API
 async def ask_groq(prompt: str) -> str:
-    url = "https://api.groq.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
     json_data = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7
+        "model": "llama3-70b-8192",
+        "messages": [
+            {"role": "system", "content": "Ты — дружелюбный Telegram-бот с ИИ, помогай пользователю."},
+            {"role": "user", "content": prompt}
+        ]
     }
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, headers=headers, json=json_data)
-        resp_json = response.json()
-        if 'choices' in resp_json and len(resp_json['choices']) > 0:
-            return resp_json['choices'][0]['message']['content']
-        else:
-            logging.error(f"Ошибка в ответе Groq: {resp_json}")
-            return "Извините, произошла ошибка при обработке вашего запроса."
 
-@dp.message.register()
+    async with aiohttp.ClientSession() as session:
+        async with session.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=json_data) as response:
+            result = await response.json()
+            try:
+                return result["choices"][0]["message"]["content"]
+            except Exception as e:
+                logging.error("Ошибка в ответе Groq: %s", result)
+                return "Извините, произошла ошибка при обработке вашего запроса."
+
+# Обработчик сообщений
 async def handle_message(message: types.Message):
     user_text = message.text
     response = await ask_groq(user_text)
     await message.answer(response)
 
-async def on_startup(app):
-    logging.info("Бот запущен")
+dp.message.register(handle_message)
 
-async def on_shutdown(app):
-    await bot.session.close()
+# Настройка webhook
+async def on_startup(bot: Bot):
+    await bot.set_webhook(WEBHOOK_URL)
 
-async def handle_webhook(request):
-    data = await request.json()
-    update = types.Update.to_object(data)
-    await dp.process_update(update)
-    return web.Response(text="ok")
+async def on_shutdown(bot: Bot):
+    await bot.delete_webhook()
 
 app = web.Application()
-app.router.add_post("/webhook", handle_webhook)
-app.on_startup.append(on_startup)
-app.on_shutdown.append(on_shutdown)
+SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+app.on_startup.append(lambda _: on_startup(bot))
+app.on_shutdown.append(lambda _: on_shutdown(bot))
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    web.run_app(app, port=port)
+    setup_application(app, dp, bot=bot)
+    web.run_app(app, port=PORT)
