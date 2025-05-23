@@ -6,10 +6,9 @@ from aiogram.utils import executor
 import openai
 
 # Получаем токены из переменных окружения
-TELEGRAM_TOKEN = os.getenv("8098073712:AAEhb8N3FZCMDM3UxrVD7v-EPPOfdJ12zjI
-")
-OPENAI_API_KEY = os.getenv("8098073712:AAEhb8N3FZCMDM3UxrVD7v-EPPOfdJ12zjI
-")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
     print("ERROR: Задай TELEGRAM_TOKEN и OPENAI_API_KEY в переменных окружения!")
