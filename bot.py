@@ -1,62 +1,79 @@
-import os
 import logging
+import os
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import Message
-from aiogram.utils.executor import start_webhook
-import requests
+from aiohttp import web
+import aiohttp
+from dotenv import load_dotenv
 
-API_TOKEN = os.getenv("TELEGRAM_TOKEN")
+load_dotenv()
+
+# Настройки
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
-WEBHOOK_PATH = f"/webhook"
+WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+WEBAPP_HOST = "0.0.0.0"
+WEBAPP_PORT = int(os.getenv("PORT", 10000))
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-bot = Bot(token=API_TOKEN)
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(bot)
 
-async def get_groq_response(prompt):
-    url = "https://api.groq.com/openai/v1/chat/completions"
+
+# Генерация ответа через Groq
+async def generate_response(message_text: str) -> str:
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
-    data = {
+
+    payload = {
         "model": "mixtral-8x7b-32768",
         "messages": [
-            {"role": "system", "content": "Ты персональный куратор пользователя по жизни."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7
+            {"role": "system", "content": "Ты персональный ИИ-куратор. Помогай пользователю с задачами, мотивацией, планами, бизнесом, психологической поддержкой и спортом."},
+            {"role": "user", "content": message_text},
+        ]
     }
 
-    response = requests.post(url, headers=headers, json=data)
-    result = response.json()
-    return result["choices"][0]["message"]["content"]
+    async with aiohttp.ClientSession() as session:
+        async with session.post(GROQ_API_URL, headers=headers, json=payload) as resp:
+            data = await resp.json()
 
+            if "choices" not in data:
+                logging.error(f"Ошибка в ответе Groq: {data}")
+                return "⚠️ Не удалось получить ответ от ИИ."
+
+            return data["choices"][0]["message"]["content"]
+
+
+# Обработка входящих сообщений
 @dp.message_handler()
-async def handle_message(message: Message):
-    await message.chat.do("typing")
-    try:
-        response = await get_groq_response(message.text)
-        await message.reply(response)
-    except Exception as e:
-        logging.error(e)
-        await message.reply("Произошла ошибка. Попробуй позже.")
+async def handle_message(message: types.Message):
+    response = await generate_response(message.text)
+    await message.answer(response)
 
-async def on_startup(dp):
+
+# Webhook обработчик
+async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
 
-async def on_shutdown(dp):
+async def on_shutdown(app):
     await bot.delete_webhook()
 
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    start_webhook(
-        dispatcher=dp,
-        webhook_path=WEBHOOK_PATH,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown,
-        skip_updates=True,
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000))
-    )
+async def handle_webhook(request):
+    update = types.Update(**await request.json())
+    await dp.process_update(update)
+    return web.Response()
+
+# Запуск aiohttp-сервера
+def main():
+    app = web.Application()
+    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    web.run_app(app, host=WEBAPP_HOST, port=WEBAPP_PORT)
+
+if __name__ == "__main__":
+    main()
