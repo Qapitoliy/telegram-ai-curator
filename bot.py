@@ -6,7 +6,6 @@ import boto3
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiogram.client.session import DefaultBotProperties  # ИСПРАВЛЕНИЕ
 from aiohttp import web
 from dotenv import load_dotenv
 
@@ -26,11 +25,11 @@ YC_ENDPOINT = os.getenv("YC_ENDPOINT")
 
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация бота с правильным парсингом
-bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+# Инициализация бота без parse_mode
+bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-# Инициализация клиента Yandex Object Storage (S3 совместимый)
+# Инициализация клиента Yandex Object Storage
 s3 = boto3.client(
     's3',
     endpoint_url=YC_ENDPOINT,
@@ -40,7 +39,6 @@ s3 = boto3.client(
 
 MEMORY_FILE = "user_memory.json"
 
-# Загрузка памяти
 def load_memory():
     try:
         s3.download_file(BUCKET_NAME, MEMORY_FILE, MEMORY_FILE)
@@ -50,7 +48,6 @@ def load_memory():
         logging.warning("Не удалось загрузить память: %s", e)
         return {}
 
-# Сохранение памяти
 def save_memory(data):
     with open(MEMORY_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -61,7 +58,6 @@ def save_memory(data):
 
 memory = load_memory()
 
-# Groq API запрос с учетом истории диалога
 async def ask_groq(user_id: str, user_text: str) -> str:
     history = memory.get(user_id, [])
     history.append({"role": "user", "content": user_text})
@@ -74,7 +70,7 @@ async def ask_groq(user_id: str, user_text: str) -> str:
         "model": "llama3-70b-8192",
         "messages": [
             {"role": "system", "content": "Ты — дружелюбный Telegram-бот с ИИ, запоминающий общение с пользователем."}
-        ] + history[-10:]  # последние 10 сообщений для контекста
+        ] + history[-10:]
     }
 
     async with aiohttp.ClientSession() as session:
@@ -94,9 +90,9 @@ async def ask_groq(user_id: str, user_text: str) -> str:
 async def handle_message(message: types.Message):
     user_id = str(message.from_user.id)
     response = await ask_groq(user_id, message.text)
-    await message.answer(response)
+    # Указываем parse_mode при отправке
+    await message.answer(response, parse_mode=ParseMode.HTML)
 
-# Webhook setup
 async def on_startup(bot: Bot):
     await bot.set_webhook(WEBHOOK_URL)
 
