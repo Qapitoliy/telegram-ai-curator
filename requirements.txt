@@ -1,7 +1,5 @@
-aiogram==3.0.0b7
+aiogram==3.4.1
 aiohttp
-aiosqlite
-python-dotenv
 boto3
 aiogram
 aiohttp
