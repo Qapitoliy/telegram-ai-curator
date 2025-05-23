@@ -1,6 +1,4 @@
 aiogram==3.4.1
-aiohttp
-boto3
-aiogram
-aiohttp
-python-dotenv
+aiohttp==3.8.4
+boto3==1.28.17
+python-dotenv==1.0.0
