@@ -1,79 +1,61 @@
 import os
 import logging
-from aiohttp import web
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import Update
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiohttp import web
 import aiohttp
+import asyncio
+import httpx
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")  # https://your-app.onrender.com
-WEBHOOK_PATH = f"/webhook/{TOKEN}"
-WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+bot = Bot(token=TELEGRAM_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-# Функция вызова Groq API
-async def ask_ai(question: str) -> str:
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    if not GROQ_API_KEY:
-        return "Ошибка: не задан ключ GROQ_API_KEY"
-
-    url = "https://api.groq.com/v1/completions"
+async def ask_groq(prompt: str) -> str:
+    url = "https://api.groq.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
-    data = {
+    json_data = {
         "model": "llama-3.3-70b-versatile",
-        "prompt": question,
-        "max_tokens": 150,
-        "temperature": 0.7,
-        "top_p": 1,
-        "stop_sequences": ["\n"]
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7
     }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, headers=headers, json=json_data)
+        resp_json = response.json()
+        if 'choices' in resp_json and len(resp_json['choices']) > 0:
+            return resp_json['choices'][0]['message']['content']
+        else:
+            logging.error(f"Ошибка в ответе Groq: {resp_json}")
+            return "Извините, произошла ошибка при обработке вашего запроса."
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=data) as resp:
-            if resp.status != 200:
-                return f"Ошибка API Groq: {resp.status}"
-            res = await resp.json()
-            try:
-                # В Groq ответ обычно в res['choices'][0]['text']
-                return res['choices'][0]['text'].strip()
-            except (KeyError, IndexError):
-                return "Ошибка в ответе Groq API"
-
-@dp.message()
+@dp.message.register()
 async def handle_message(message: types.Message):
-    question = message.text
-    await message.answer("Думаю...")
-    answer = await ask_ai(question)
-    await message.answer(answer)
+    user_text = message.text
+    response = await ask_groq(user_text)
+    await message.answer(response)
 
-async def handle_update(request: web.Request):
-    try:
-        data = await request.json()
-        update = Update(**data)
-        await dp.process_update(update)
-        return web.Response(text="OK")
-    except Exception as e:
-        logging.exception("Ошибка при обработке update")
-        return web.Response(status=500, text=str(e))
+async def on_startup(app):
+    logging.info("Бот запущен")
 
-async def on_startup(app: web.Application):
-    logging.info("Setting webhook")
-    await bot.set_webhook(WEBHOOK_URL)
-
-async def on_shutdown(app: web.Application):
-    logging.info("Deleting webhook")
-    await bot.delete_webhook()
+async def on_shutdown(app):
     await bot.session.close()
 
+async def handle_webhook(request):
+    data = await request.json()
+    update = types.Update.to_object(data)
+    await dp.process_update(update)
+    return web.Response(text="ok")
+
 app = web.Application()
-app.router.add_post(WEBHOOK_PATH, handle_update)
+app.router.add_post("/webhook", handle_webhook)
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
