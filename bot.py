@@ -11,7 +11,7 @@ WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
 PORT = int(os.getenv("PORT", 5000))
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("GROQ_API_KEY")
 openai.api_key = OPENAI_API_KEY
 
 bot = Bot(token=TOKEN)
