@@ -3,6 +3,7 @@ import json
 import logging
 import aiohttp
 import boto3
+import asyncio
 from botocore.exceptions import ClientError
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
@@ -53,6 +54,7 @@ s3 = boto3.client(
 )
 
 MEMORY_FILE = "user_memory.json"
+MAX_HISTORY_LEN = 50  # Максимум сообщений в памяти на пользователя
 
 def load_memory():
     try:
@@ -74,17 +76,19 @@ def load_memory():
         logging.warning(f"Не удалось загрузить память: {e}")
         return {}
 
-def save_memory(data):
+memory = load_memory()
+
+async def save_memory_async(data):
     try:
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         logging.info(f"Загружаем {MEMORY_FILE} в бакет {BUCKET_NAME}...")
-        s3.upload_file(MEMORY_FILE, BUCKET_NAME, MEMORY_FILE)
+        loop = asyncio.get_event_loop()
+        # Запускаем blocking upload_file в отдельном потоке
+        await loop.run_in_executor(None, s3.upload_file, MEMORY_FILE, BUCKET_NAME, MEMORY_FILE)
         logging.info("Память успешно сохранена.")
     except Exception as e:
         logging.error(f"Ошибка при сохранении памяти: {e}")
-
-memory = load_memory()
 
 # Глобальная переменная для aiohttp-сессии
 session: aiohttp.ClientSession | None = None
@@ -97,6 +101,9 @@ async def ask_groq(user_id: str, user_text: str) -> str:
 
     history = memory.get(user_id, [])
     history.append({"role": "user", "content": user_text})
+    # Обрезаем историю до MAX_HISTORY_LEN сообщений
+    if len(history) > MAX_HISTORY_LEN:
+        history = history[-MAX_HISTORY_LEN:]
 
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -106,16 +113,21 @@ async def ask_groq(user_id: str, user_text: str) -> str:
         "model": "llama3-70b-8192",
         "messages": [
             {"role": "system", "content": "Ты — дружелюбный Telegram-бот с ИИ, запоминающий общение с пользователем."}
-        ] + history[-10:]
+        ] + history[-10:]  # для запроса берем последние 10 сообщений
     }
 
     try:
         async with session.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=json_data) as response:
+            if response.status != 200:
+                text = await response.text()
+                logging.error(f"Ошибка API Groq {response.status}: {text}")
+                return "Ошибка сервиса, попробуйте позже."
             result = await response.json()
             reply = result["choices"][0]["message"]["content"]
             history.append({"role": "assistant", "content": reply})
             memory[user_id] = history
-            save_memory(memory)
+            # Асинхронное сохранение, не дожидаемся
+            asyncio.create_task(save_memory_async(memory))
             return reply
     except Exception as e:
         logging.error(f"Ошибка при запросе к Groq API: {e}")
@@ -129,8 +141,9 @@ async def handle_message(message: types.Message):
 
 async def on_startup(app):
     global session
-    logging.info("Создаём aiohttp.ClientSession...")
-    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+    if session is None or session.closed:
+        logging.info("Создаём aiohttp.ClientSession...")
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
     logging.info("Устанавливаем webhook...")
     await bot.set_webhook(WEBHOOK_URL)
 
@@ -138,7 +151,7 @@ async def on_shutdown(app):
     global session
     logging.info("Удаляем webhook...")
     await bot.delete_webhook()
-    if session:
+    if session and not session.closed:
         logging.info("Закрываем aiohttp.ClientSession...")
         await session.close()
         session = None
