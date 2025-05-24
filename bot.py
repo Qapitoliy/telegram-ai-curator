@@ -120,11 +120,11 @@ async def handle_message(message: types.Message):
     response = await ask_groq(user_id, message.text)
     await message.answer(response, parse_mode=ParseMode.HTML)
 
-async def on_startup():
+async def on_startup(app):
     logging.info("Устанавливаем webhook...")
     await bot.set_webhook(WEBHOOK_URL)
 
-async def on_shutdown():
+async def on_shutdown(app):
     logging.info("Удаляем webhook...")
     await bot.delete_webhook()
 
