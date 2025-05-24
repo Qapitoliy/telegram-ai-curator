@@ -54,7 +54,7 @@ s3 = boto3.client(
 )
 
 MEMORY_FILE = "user_memory.json"
-MAX_HISTORY_LEN = 50  # Максимум сообщений в памяти на пользователя
+MAX_HISTORY_LEN = 50  # Максимальное количество сообщений в истории пользователя
 
 def load_memory():
     try:
@@ -65,15 +65,14 @@ def load_memory():
         logging.info("Память успешно загружена.")
         return data
     except ClientError as e:
-        error_code = e.response['Error']['Code']
-        if error_code == 'NoSuchKey':
+        if e.response['Error']['Code'] == 'NoSuchKey':
             logging.warning("Файл памяти не найден в бакете, создаём новую память.")
             return {}
         else:
-            logging.warning(f"Не удалось загрузить память: {e}")
+            logging.warning(f"Ошибка загрузки памяти: {e}")
             return {}
     except Exception as e:
-        logging.warning(f"Не удалось загрузить память: {e}")
+        logging.warning(f"Ошибка загрузки памяти: {e}")
         return {}
 
 memory = load_memory()
@@ -84,24 +83,23 @@ async def save_memory_async(data):
             json.dump(data, f, ensure_ascii=False, indent=2)
         logging.info(f"Загружаем {MEMORY_FILE} в бакет {BUCKET_NAME}...")
         loop = asyncio.get_event_loop()
-        # Запускаем blocking upload_file в отдельном потоке
         await loop.run_in_executor(None, s3.upload_file, MEMORY_FILE, BUCKET_NAME, MEMORY_FILE)
         logging.info("Память успешно сохранена.")
     except Exception as e:
         logging.error(f"Ошибка при сохранении памяти: {e}")
 
-# Глобальная переменная для aiohttp-сессии
+# Aiohttp session
 session: aiohttp.ClientSession | None = None
 
 async def ask_groq(user_id: str, user_text: str) -> str:
     global session
-    if session is None:
-        logging.error("Сессия aiohttp не инициализирована!")
-        return "Внутренняя ошибка, попробуйте позже."
+    if session is None or session.closed:
+        logging.warning("Сессия aiohttp была закрыта. Создаём новую...")
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
 
     history = memory.get(user_id, [])
     history.append({"role": "user", "content": user_text})
-    # Обрезаем историю до MAX_HISTORY_LEN сообщений
+
     if len(history) > MAX_HISTORY_LEN:
         history = history[-MAX_HISTORY_LEN:]
 
@@ -109,11 +107,12 @@ async def ask_groq(user_id: str, user_text: str) -> str:
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
+
     json_data = {
         "model": "llama3-70b-8192",
         "messages": [
             {"role": "system", "content": "Ты — дружелюбный Telegram-бот с ИИ, запоминающий общение с пользователем."}
-        ] + history[-10:]  # для запроса берем последние 10 сообщений
+        ] + history[-10:]
     }
 
     try:
@@ -122,11 +121,11 @@ async def ask_groq(user_id: str, user_text: str) -> str:
                 text = await response.text()
                 logging.error(f"Ошибка API Groq {response.status}: {text}")
                 return "Ошибка сервиса, попробуйте позже."
+
             result = await response.json()
             reply = result["choices"][0]["message"]["content"]
             history.append({"role": "assistant", "content": reply})
             memory[user_id] = history
-            # Асинхронное сохранение, не дожидаемся
             asyncio.create_task(save_memory_async(memory))
             return reply
     except Exception as e:
@@ -136,14 +135,18 @@ async def ask_groq(user_id: str, user_text: str) -> str:
 @dp.message()
 async def handle_message(message: types.Message):
     user_id = str(message.from_user.id)
-    response = await ask_groq(user_id, message.text)
-    await message.answer(response, parse_mode=ParseMode.HTML)
+    try:
+        response = await ask_groq(user_id, message.text)
+        await message.answer(response, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logging.error(f"Ошибка в обработчике сообщений: {e}")
+        await message.answer("Произошла ошибка при обработке вашего сообщения. Попробуйте позже.")
 
 async def on_startup(app):
     global session
     if session is None or session.closed:
-        logging.info("Создаём aiohttp.ClientSession...")
-        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+        logging.info("Создаём aiohttp.ClientSession на старте...")
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
     logging.info("Устанавливаем webhook...")
     await bot.set_webhook(WEBHOOK_URL)
 
