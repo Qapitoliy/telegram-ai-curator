@@ -3,6 +3,7 @@ import json
 import logging
 import aiohttp
 import boto3
+from botocore.exceptions import ClientError
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -61,17 +62,22 @@ def load_memory():
             data = json.load(f)
         logging.info("Память успешно загружена.")
         return data
-    except s3.exceptions.NoSuchKey:
-        logging.warning("Файл памяти не найден в бакете, создаём новую память.")
-        return {}
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code == 'NoSuchKey':
+            logging.warning("Файл памяти не найден в бакете, создаём новую память.")
+            return {}
+        else:
+            logging.warning(f"Не удалось загрузить память: {e}")
+            return {}
     except Exception as e:
         logging.warning(f"Не удалось загрузить память: {e}")
         return {}
 
 def save_memory(data):
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
     try:
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
         logging.info(f"Загружаем {MEMORY_FILE} в бакет {BUCKET_NAME}...")
         s3.upload_file(MEMORY_FILE, BUCKET_NAME, MEMORY_FILE)
         logging.info("Память успешно сохранена.")
@@ -114,14 +120,17 @@ async def handle_message(message: types.Message):
     response = await ask_groq(user_id, message.text)
     await message.answer(response, parse_mode=ParseMode.HTML)
 
-async def on_startup(bot: Bot):
+async def on_startup():
+    logging.info("Устанавливаем webhook...")
     await bot.set_webhook(WEBHOOK_URL)
 
-async def on_shutdown(bot: Bot):
+async def on_shutdown():
+    logging.info("Удаляем webhook...")
     await bot.delete_webhook()
 
 app = web.Application()
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
