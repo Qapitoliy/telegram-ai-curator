@@ -27,7 +27,6 @@ YC_ENDPOINT = os.getenv("YC_ENDPOINT")
 
 logging.basicConfig(level=logging.INFO)
 
-# Проверка обязательных переменных окружения
 required_env = {
     "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
     "GROQ_API_KEY": GROQ_API_KEY,
@@ -88,14 +87,18 @@ async def save_memory_async(data):
     except Exception as e:
         logging.error(f"Ошибка при сохранении памяти: {e}")
 
-# Aiohttp session
+# Глобальная переменная для aiohttp-сессии
 session: aiohttp.ClientSession | None = None
 
-async def ask_groq(user_id: str, user_text: str) -> str:
+async def get_session() -> aiohttp.ClientSession:
     global session
     if session is None or session.closed:
-        logging.warning("Сессия aiohttp была закрыта. Создаём новую...")
+        logging.info("Инициализация новой aiohttp.ClientSession...")
         session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+    return session
+
+async def ask_groq(user_id: str, user_text: str) -> str:
+    session = await get_session()
 
     history = memory.get(user_id, [])
     history.append({"role": "user", "content": user_text})
