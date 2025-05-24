@@ -86,7 +86,15 @@ def save_memory(data):
 
 memory = load_memory()
 
+# Глобальная переменная для aiohttp-сессии
+session: aiohttp.ClientSession | None = None
+
 async def ask_groq(user_id: str, user_text: str) -> str:
+    global session
+    if session is None:
+        logging.error("Сессия aiohttp не инициализирована!")
+        return "Внутренняя ошибка, попробуйте позже."
+
     history = memory.get(user_id, [])
     history.append({"role": "user", "content": user_text})
 
@@ -101,18 +109,17 @@ async def ask_groq(user_id: str, user_text: str) -> str:
         ] + history[-10:]
     }
 
-    async with aiohttp.ClientSession() as session:
+    try:
         async with session.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=json_data) as response:
             result = await response.json()
-            try:
-                reply = result["choices"][0]["message"]["content"]
-                history.append({"role": "assistant", "content": reply})
-                memory[user_id] = history
-                save_memory(memory)
-                return reply
-            except Exception:
-                logging.error(f"Ошибка в ответе Groq: {result}")
-                return "Извините, произошла ошибка при обработке вашего запроса."
+            reply = result["choices"][0]["message"]["content"]
+            history.append({"role": "assistant", "content": reply})
+            memory[user_id] = history
+            save_memory(memory)
+            return reply
+    except Exception as e:
+        logging.error(f"Ошибка при запросе к Groq API: {e}")
+        return "Извините, произошла ошибка при обработке вашего запроса."
 
 @dp.message()
 async def handle_message(message: types.Message):
@@ -121,12 +128,20 @@ async def handle_message(message: types.Message):
     await message.answer(response, parse_mode=ParseMode.HTML)
 
 async def on_startup(app):
+    global session
+    logging.info("Создаём aiohttp.ClientSession...")
+    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
     logging.info("Устанавливаем webhook...")
     await bot.set_webhook(WEBHOOK_URL)
 
 async def on_shutdown(app):
+    global session
     logging.info("Удаляем webhook...")
     await bot.delete_webhook()
+    if session:
+        logging.info("Закрываем aiohttp.ClientSession...")
+        await session.close()
+        session = None
 
 app = web.Application()
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
