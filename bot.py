@@ -108,7 +108,7 @@ async def ask_groq(user_id: str, user_text: str) -> str:
                 logging.error(f"Ошибка в ответе Groq: {result}")
                 return "Извините, произошла ошибка при обработке вашего запроса."
 
-@dp.message_handler()
+@dp.message()
 async def handle_message(message: types.Message):
     user_id = str(message.from_user.id)
     response = await ask_groq(user_id, message.text)
