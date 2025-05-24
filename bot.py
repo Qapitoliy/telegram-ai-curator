@@ -8,11 +8,11 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
-from dotenv import load_dotenv
 
-load_dotenv()
+# === Настройки логирования ===
+logging.basicConfig(level=logging.INFO)
 
-# Переменные окружения
+# === Загрузка переменных окружения ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
@@ -25,8 +25,7 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 YC_ENDPOINT = os.getenv("YC_ENDPOINT")
 
-logging.basicConfig(level=logging.INFO)
-
+# Проверка обязательных переменных
 required_env = {
     "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
     "GROQ_API_KEY": GROQ_API_KEY,
@@ -42,18 +41,19 @@ for k, v in required_env.items():
         logging.error(f"Переменная окружения {k} не установлена!")
         exit(1)
 
+# === Инициализация бота и диспетчера ===
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-# Асинхронный клиент S3
+# === Асинхронный клиент S3 ===
 session_s3 = aioboto3.Session(
     aws_access_key_id=AWS_ACCESS_KEY_ID,
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
 )
 
 MEMORY_FILE = "user_memory.json"
-MAX_HISTORY_LEN = 50  # Максимум истории в памяти
-HISTORY_TO_GROQ = 10   # Сколько отправлять в Groq API
+MAX_HISTORY_LEN = 50
+HISTORY_TO_GROQ = 10
 
 memory = {}
 memory_queue = asyncio.Queue()
@@ -91,7 +91,7 @@ async def save_memory_worker():
 def schedule_save():
     asyncio.create_task(memory_queue.put(memory.copy()))
 
-# Глобальная сессия aiohttp
+# === HTTP-сессия для Groq ===
 session_http = None
 
 async def get_session():
@@ -100,6 +100,7 @@ async def get_session():
         session_http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
     return session_http
 
+# === Логика Groq ===
 async def ask_groq(user_id: str, user_text: str) -> str:
     session = await get_session()
 
@@ -122,7 +123,11 @@ async def ask_groq(user_id: str, user_text: str) -> str:
     }
 
     try:
-        async with session.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=json_data) as response:
+        async with session.post(
+            "https://api.groq.com/openai/v1/chat/completions ",
+            headers=headers,
+            json=json_data
+        ) as response:
             if response.status != 200:
                 text = await response.text()
                 logging.error(f"Ошибка API Groq {response.status}: {text}")
@@ -132,12 +137,13 @@ async def ask_groq(user_id: str, user_text: str) -> str:
             reply = result["choices"][0]["message"]["content"]
             history.append({"role": "assistant", "content": reply})
             memory[user_id] = history
-            schedule_save()  # Запланировать сохранение
+            schedule_save()
             return reply
     except Exception as e:
         logging.error(f"Ошибка при запросе к Groq API: {e}")
         return "Произошла ошибка при обработке вашего запроса."
 
+# === Обработчик сообщений ===
 @dp.message()
 async def handle_message(message: types.Message):
     user_id = str(message.from_user.id)
@@ -148,6 +154,7 @@ async def handle_message(message: types.Message):
         logging.error(f"Ошибка в обработчике сообщений: {e}")
         await message.answer("Произошла ошибка при обработке вашего сообщения. Попробуйте позже.")
 
+# === Webhook setup ===
 async def on_startup(app):
     await load_memory()
     asyncio.create_task(save_memory_worker())
@@ -157,15 +164,23 @@ async def on_startup(app):
 async def on_shutdown(app):
     logging.info("Удаляем webhook...")
     await bot.delete_webhook()
-    if session_http and not session_http.closed:
+    if 'session_http' in globals() and not session_http.closed:
         await session_http.close()
 
+# === Health check для Render ===
+async def health_check(request):
+    return web.Response(text="OK")
+
+# === Создание и настройка приложения ===
 app = web.Application()
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
-
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
+# Добавим маршрут /health для проверки Render
+app.router.add_get("/health", health_check)
+
+# === Точка входа ===
 if __name__ == "__main__":
     setup_application(app, dp, bot=bot)
-    web.run_app(app, port=PORT)
+    web.run_app(app, host='0.0.0.0', port=PORT)
