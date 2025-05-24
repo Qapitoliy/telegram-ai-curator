@@ -122,7 +122,7 @@ async def ask_groq(user_id: str, user_text: str) -> str:
     }
 
     try:
-        async with session.post("https://api.groq.com/openai/v1/chat/completions ", headers=headers, json=json_data) as response:
+        async with session.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=json_data) as response:
             if response.status != 200:
                 text = await response.text()
                 logging.error(f"Ошибка API Groq {response.status}: {text}")
