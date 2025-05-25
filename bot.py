@@ -56,6 +56,7 @@ MAX_HISTORY_LEN = 50
 HISTORY_TO_GROQ = 10
 
 memory = {}
+memory_lock = asyncio.Lock()
 memory_queue = asyncio.Queue()
 
 async def load_memory():
@@ -104,11 +105,12 @@ async def get_session():
 async def ask_groq(user_id: str, user_text: str) -> str:
     session = await get_session()
 
-    history = memory.get(user_id, [])
-    history.append({"role": "user", "content": user_text})
-
-    if len(history) > MAX_HISTORY_LEN:
-        history = history[-MAX_HISTORY_LEN:]
+    async with memory_lock:
+        history = memory.get(user_id, [])
+        history.append({"role": "user", "content": user_text})
+        if len(history) > MAX_HISTORY_LEN:
+            history = history[-MAX_HISTORY_LEN:]
+        memory[user_id] = history.copy()
 
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -124,7 +126,7 @@ async def ask_groq(user_id: str, user_text: str) -> str:
 
     try:
         async with session.post(
-            "https://api.groq.com/openai/v1/chat/completions ",
+            "https://api.groq.com/openai/v1/chat/completions",
             headers=headers,
             json=json_data
         ) as response:
@@ -135,10 +137,14 @@ async def ask_groq(user_id: str, user_text: str) -> str:
 
             result = await response.json()
             reply = result["choices"][0]["message"]["content"]
+
+        async with memory_lock:
             history.append({"role": "assistant", "content": reply})
             memory[user_id] = history
-            schedule_save()
-            return reply
+        schedule_save()
+
+        return reply
+
     except Exception as e:
         logging.error(f"Ошибка при запросе к Groq API: {e}")
         return "Произошла ошибка при обработке вашего запроса."
@@ -164,8 +170,9 @@ async def on_startup(app):
 async def on_shutdown(app):
     logging.info("Удаляем webhook...")
     await bot.delete_webhook()
-    if 'session_http' in globals() and not session_http.closed:
+    if session_http and not session_http.closed:
         await session_http.close()
+    await memory_queue.join()
 
 # === Health check для Render ===
 async def health_check(request):
