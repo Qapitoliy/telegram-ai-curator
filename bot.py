@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 
 # === Загрузка переменных окружения ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Изменили имя
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
@@ -28,7 +28,7 @@ YC_ENDPOINT = os.getenv("YC_ENDPOINT")
 # Проверка обязательных переменных
 required_env = {
     "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
-    "GROQ_API_KEY": GROQ_API_KEY,
+    "OPENROUTER_API_KEY": OPENROUTER_API_KEY,  # Теперь здесь
     "WEBHOOK_HOST": WEBHOOK_HOST,
     "BUCKET_NAME": BUCKET_NAME,
     "AWS_ACCESS_KEY_ID": AWS_ACCESS_KEY_ID,
@@ -53,7 +53,7 @@ session_s3 = aioboto3.Session(
 
 MEMORY_FILE = "user_memory.json"
 MAX_HISTORY_LEN = 50
-HISTORY_TO_GROQ = 10
+HISTORY_TO_MODEL = 10  # Сколько последних сообщений отправлять модели
 
 memory = {}
 memory_lock = asyncio.Lock()
@@ -92,7 +92,7 @@ async def save_memory_worker():
 def schedule_save():
     asyncio.create_task(memory_queue.put(memory.copy()))
 
-# === HTTP-сессия для Groq ===
+# === HTTP-сессия для OpenRouter ===
 session_http = None
 
 async def get_session():
@@ -101,8 +101,8 @@ async def get_session():
         session_http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
     return session_http
 
-# === Логика Groq ===
-async def ask_groq(user_id: str, user_text: str) -> str:
+# === Логика OpenRouter ===
+async def ask_openrouter(user_id: str, user_text: str) -> str:
     session = await get_session()
 
     async with memory_lock:
@@ -110,29 +110,31 @@ async def ask_groq(user_id: str, user_text: str) -> str:
         history.append({"role": "user", "content": user_text})
         if len(history) > MAX_HISTORY_LEN:
             history = history[-MAX_HISTORY_LEN:]
-        memory[user_id] = history.copy()
+        memory[user_id] = list(history)  # поверхностная копия
 
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": WEBHOOK_HOST or "https://your-app-url.com ",
+        "X-Title": "Telegram AI Bot",
         "Content-Type": "application/json"
     }
 
     json_data = {
-        "model": "llama3-70b-8192",
+        "model": "mistralai/mistral-7b-instruct:free",  # Бесплатная модель
         "messages": [
             {"role": "system", "content": "Ты — дружелюбный Telegram-бот с ИИ, запоминающий общение с пользователем."}
-        ] + history[-HISTORY_TO_GROQ:]
+        ] + history[-HISTORY_TO_MODEL:]
     }
 
     try:
         async with session.post(
-            "https://api.groq.com/openai/v1/chat/completions",
+            "https://openrouter.ai/api/v1/chat/completions ",
             headers=headers,
             json=json_data
         ) as response:
             if response.status != 200:
                 text = await response.text()
-                logging.error(f"Ошибка API Groq {response.status}: {text}")
+                logging.error(f"Ошибка API OpenRouter {response.status}: {text}")
                 return "Ошибка сервиса, попробуйте позже."
 
             result = await response.json()
@@ -140,22 +142,26 @@ async def ask_groq(user_id: str, user_text: str) -> str:
 
         async with memory_lock:
             history.append({"role": "assistant", "content": reply})
-            memory[user_id] = history
+            memory[user_id] = list(history)
         schedule_save()
 
         return reply
 
     except Exception as e:
-        logging.error(f"Ошибка при запросе к Groq API: {e}")
+        logging.error(f"Ошибка при запросе к OpenRouter: {e}")
         return "Произошла ошибка при обработке вашего запроса."
 
 # === Обработчик сообщений ===
 @dp.message()
 async def handle_message(message: types.Message):
     user_id = str(message.from_user.id)
+    if not message.text:
+        await message.answer("Поддерживаются только текстовые сообщения.")
+        return
+
     try:
-        response = await ask_groq(user_id, message.text)
-        await message.answer(response, parse_mode=ParseMode.HTML)
+        response = await ask_openrouter(user_id, message.text)
+        await message.answer(response, parse_mode=ParseMode.NONE)  # Отключаем HTML
     except Exception as e:
         logging.error(f"Ошибка в обработчике сообщений: {e}")
         await message.answer("Произошла ошибка при обработке вашего сообщения. Попробуйте позже.")
